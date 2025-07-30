@@ -1,0 +1,11 @@
+# Streamlit App Requirements
+streamlit>=1.28.0
+tensorflow>=2.15.0
+music21>=9.1.0
+pretty_midi>=0.2.10
+pillow>=10.0.0
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.11.0
+soundfile>=0.12.0

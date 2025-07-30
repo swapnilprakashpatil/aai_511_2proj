@@ -19,3 +19,8 @@ colabcode
 torch
 torchvision
 torchaudio
+streamlit
+pillow
+requests
+scipy
+soundfile
