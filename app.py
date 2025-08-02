@@ -28,6 +28,7 @@ st.set_page_config(
 DATA_DIR = "data/midiclassics"
 MODEL_PATH = "data/model/composer_classification_model_best.keras"
 ARTIFACTS_PATH = "data/model/composer_classification_model_artifacts.pkl"
+FEATURES_DIR = "data/features"  # Added features directory
 
 # Composer information with Wikipedia images
 COMPOSER_INFO = {
@@ -76,6 +77,129 @@ def load_model_and_artifacts():
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
         return None, None
+
+@st.cache_data
+def load_extracted_features():
+    """Load pre-extracted features from the features folder"""
+    try:
+        musical_path = os.path.join(FEATURES_DIR, "musical_features_df.pkl")
+        harmonic_path = os.path.join(FEATURES_DIR, "harmonic_features_df.pkl")
+        note_mapping_path = os.path.join(FEATURES_DIR, "note_mapping.pkl")
+        sequences_path = os.path.join(FEATURES_DIR, "note_sequences.npy")
+        labels_path = os.path.join(FEATURES_DIR, "sequence_labels.npy")
+        
+        if not all(os.path.exists(p) for p in [musical_path, harmonic_path, sequences_path, labels_path]):
+            st.warning("Pre-extracted features not found. Please run feature extraction first.")
+            return None, None, None, None, None
+        
+        with open(musical_path, 'rb') as f:
+            musical_df = pickle.load(f)
+        
+        with open(harmonic_path, 'rb') as f:
+            harmonic_df = pickle.load(f)
+        
+        with open(note_mapping_path, 'rb') as f:
+            note_mapping = pickle.load(f)
+            
+        note_sequences = np.load(sequences_path)
+        sequence_labels = np.load(labels_path)
+        
+        st.success(f"✅ Loaded pre-extracted features: {len(musical_df)} musical, {len(harmonic_df)} harmonic, {len(note_sequences)} sequences")
+        return musical_df, harmonic_df, note_mapping, note_sequences, sequence_labels
+        
+    except Exception as e:
+        st.error(f"Error loading extracted features: {str(e)}")
+        return None, None, None, None, None
+
+def get_features_for_file(midi_path, musical_df, harmonic_df, note_sequences, sequence_labels):
+    """Get pre-extracted features for a specific MIDI file, following notebook approach"""
+    try:
+        # Create file identifier that matches the extraction process
+        file_name = os.path.basename(midi_path)
+        
+        # Look for the file in musical features dataframe
+        musical_features = None
+        if midi_path in musical_df.index:
+            musical_row = musical_df.loc[midi_path]
+            musical_features = musical_row.drop(['composer', 'file_path'], errors='ignore').values
+        else:
+            # Try matching by filename or partial path
+            matching_rows = musical_df[musical_df.index.str.contains(file_name.replace('.mid', '').replace('.midi', ''), na=False)]
+            if len(matching_rows) == 0:
+                # Try checking file_path column if it exists
+                if 'file_path' in musical_df.columns:
+                    matching_rows = musical_df[musical_df['file_path'].str.contains(file_name, na=False)]
+            
+            if len(matching_rows) > 0:
+                musical_row = matching_rows.iloc[0]
+                musical_features = musical_row.drop(['composer', 'file_path'], errors='ignore').values
+        
+        # Look for the file in harmonic features dataframe
+        harmonic_features = None
+        if harmonic_df is not None:
+            if midi_path in harmonic_df.index:
+                harmonic_row = harmonic_df.loc[midi_path]
+                harmonic_features = harmonic_row.drop(['composer', 'file_path'], errors='ignore').values
+            else:
+                # Try matching by filename or partial path
+                matching_harmonic = harmonic_df[harmonic_df.index.str.contains(file_name.replace('.mid', '').replace('.midi', ''), na=False)]
+                if len(matching_harmonic) == 0:
+                    # Try checking file_path column if it exists
+                    if 'file_path' in harmonic_df.columns:
+                        matching_harmonic = harmonic_df[harmonic_df['file_path'].str.contains(file_name, na=False)]
+                
+                if len(matching_harmonic) > 0:
+                    harmonic_row = matching_harmonic.iloc[0]
+                    harmonic_features = harmonic_row.drop(['composer', 'file_path'], errors='ignore').values
+        
+        # Find corresponding note sequence
+        note_sequence = None
+        if sequence_labels is not None and note_sequences is not None:
+            # Find index by matching file path or filename
+            for i, label_path in enumerate(sequence_labels):
+                if isinstance(label_path, str):
+                    label_filename = os.path.basename(label_path).replace('.mid', '').replace('.midi', '')
+                    current_filename = file_name.replace('.mid', '').replace('.midi', '')
+                    if label_path == midi_path or label_filename == current_filename or current_filename in label_path:
+                        if i < len(note_sequences):
+                            note_sequence = note_sequences[i]
+                        break
+        
+        # Return None if key components are missing
+        if musical_features is None:
+            st.warning(f"No musical features found for {file_name}")
+            return None, None, None
+        
+        # If harmonic features not found, create default ones based on musical features
+        if harmonic_features is None:
+            st.warning(f"No harmonic features found for {file_name}, using defaults")
+            # Create simple harmonic features based on musical features
+            harmonic_features = np.zeros(15)  # Default harmonic feature size
+            if len(musical_features) > 0:
+                harmonic_features[0] = musical_features[2] / 120.0 if len(musical_features) > 2 else 0.5  # tempo
+                harmonic_features[1] = musical_features[1] / 100.0 if len(musical_features) > 1 else 0.5  # duration
+                harmonic_features[2] = musical_features[0] / 1000.0 if len(musical_features) > 0 else 0.5  # notes
+                # Fill rest with defaults
+                harmonic_features[3:] = 0.5
+        
+        # If note sequence not found, create a default one
+        if note_sequence is None:
+            st.warning(f"No note sequence found for {file_name}, using defaults")
+            note_sequence = np.zeros(100)  # Default sequence length
+            # Create a simple pattern based on musical features if available
+            if len(musical_features) > 3:
+                avg_pitch = musical_features[3] if len(musical_features) > 3 else 60
+                note_sequence[:50] = (avg_pitch / 127.0)  # Normalized pitch pattern
+        
+        return (
+            musical_features.reshape(1, -1),
+            harmonic_features.reshape(1, -1),
+            note_sequence.reshape(1, -1)
+        )
+        
+    except Exception as e:
+        st.error(f"Error getting features for {midi_path}: {str(e)}")
+        return None, None, None
 
 @st.cache_data
 def get_midi_files_for_composer(composer):
@@ -333,6 +457,9 @@ def main():
         st.error("Failed to load the model. Please check if the model files exist.")
         return
     
+    # Load pre-extracted features
+    musical_df, harmonic_df, note_mapping, note_sequences, sequence_labels = load_extracted_features()
+    
     # Get composer names
     composer_names = artifacts.get('composer_names', ['Bach', 'Beethoven', 'Chopin', 'Mozart'])
     
@@ -351,6 +478,12 @@ def main():
     if mode == "🔍 Predict Composer":
         st.header("🔍 Composer Prediction")
         st.markdown("Select a composer and piece to test the AI's prediction capabilities!")
+        
+        # Show feature extraction status
+        if musical_df is not None:
+            st.info(f"✅ Using pre-extracted features for {len(musical_df)} files")
+        else:
+            st.warning("⚠️ Pre-extracted features not available. Will extract features on-demand (slower).")
         
         # Composer selection
         selected_composer = st.selectbox(
@@ -405,10 +538,22 @@ def main():
             
             # Prediction button
             if st.button("🎯 Predict Composer", type="primary", use_container_width=True):
-                with st.spinner("🔍 Analyzing musical features and making prediction..."):
+                with st.spinner("🔍 Loading features and making prediction..."):
                     
-                    # Extract features
-                    musical_features, harmonic_features, note_sequence = extract_features_for_model(selected_file)
+                    # Try to get pre-extracted features first
+                    musical_features, harmonic_features, note_sequence = None, None, None
+                    
+                    if musical_df is not None:
+                        musical_features, harmonic_features, note_sequence = get_features_for_file(
+                            selected_file, musical_df, harmonic_df, note_sequences, sequence_labels
+                        )
+                        if musical_features is not None:
+                            st.success("✅ Using pre-extracted features")
+                    
+                    # Fallback to on-demand extraction if pre-extracted not available
+                    if musical_features is None:
+                        st.info("⚠️ Pre-extracted features not found, extracting on-demand...")
+                        musical_features, harmonic_features, note_sequence = extract_features_for_model(selected_file)
                     
                     if musical_features is None:
                         st.error("Failed to extract features from the MIDI file.")
